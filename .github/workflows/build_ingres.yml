@@ -14,7 +14,8 @@ on:
         required: true
         type: choice
         default: "13"
-        options :
+        options:
+          - 13
            
       modules_branch:
         description: "Branch for the LineageOS modules repo (unaffected by kernel_source/kernel_branch above - currently defaults to lineage-23.2)"
