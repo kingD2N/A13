@@ -6,9 +6,16 @@
 #    *_Module.zip  -> flash lewat manager (KernelSU-Next / SukiSU / Magisk / MMRL)
 #    *_TWRP.zip    -> flash lewat TWRP / OrangeFox (pasang ke /data/adb/modules)
 #
+#  Sumber driver (Adreno 730, V837.0.9): zip TWRP milik kamu sendiri, mis.
+#  Axion_GPU_Driver_V837_0_9_ingres_QPR2_TWRP.zip (asal @adrenolaboratory).
+#  Layout yang dikenali: flat (lib/ lib64/ gpu/ firmware/ qgl_config.txt system/etc/permissions)
+#  atau module (system/vendor/...).
+#
 #  Cara pakai (dari HP):
-#    Actions -> "Build Adreno 730 GPU Driver (ingres)" -> Run workflow
-#    Isi src_url (link zip driver 837.0.9: GitHub Release / GDrive / Mega) atau src_path.
+#    1. Sekali saja: Releases -> Draft a new release -> tag "driver-src" -> lampirkan zip
+#       driver 837.0.9 -> Publish release. (Repo private pun aman, diunduh pakai token repo.)
+#    2. Actions -> "Build Adreno 730 GPU Driver (ingres)" -> Run workflow (default sudah benar).
+#       Kolom src_url / src_path hanya perlu diisi kalau zip TIDAK ada di release driver-src.
 #    Run pertama: matikan publish_release untuk uji dulu (zip ada di Artifacts).
 # =============================================================================
 name: Build Adreno 730 GPU Driver (ingres)
@@ -21,7 +28,7 @@ on:
         required: true
         default: '837.0.9'
       src_url:
-        description: 'Link source driver (direct / Google Drive / Mega). Kosongkan jika pakai src_path'
+        description: 'Link source driver (direct / GDrive / Mega). Kosong = ambil zip dari release driver-src'
         required: false
         default: ''
       src_sha256:
@@ -32,12 +39,16 @@ on:
         description: 'Alternatif: path file/folder source di repo ini'
         required: false
         default: ''
+      src_release_tag:
+        description: 'Tag release di repo ini yang berisi zip source (dipakai jika src_url & src_path kosong)'
+        required: false
+        default: 'driver-src'
       tree_branch:
         description: 'Branch Tree_ingres'
         required: false
         default: 'Ingres_tree'
       include_firmware:
-        description: 'Ikutkan firmware A730 dari source (eksperimental, default pakai stock ROM)'
+        description: 'Ikutkan a730_sqe.fw dari source (eksperimental, mungkin tanpa efek; default pakai stock ROM)'
         type: boolean
         default: false
       extra_blocklist:
@@ -256,7 +267,7 @@ jobs:
           cat > ax/scripts/fetch_source.sh <<'__AX_EOF_FETCH_SOURCE__'
           #!/usr/bin/env bash
           # Ambil source driver Adreno (SRC_PATH di repo ini, atau SRC_URL) ke folder dl/
-          # Env: SRC_URL, SRC_PATH, SRC_SHA256
+          # Env: SRC_URL, SRC_PATH, SRC_SHA256, SRC_TAG, DRIVER_VERSION, GH_TOKEN, GITHUB_REPOSITORY
           set -euo pipefail
 
           rm -rf dl && mkdir -p dl
@@ -288,9 +299,44 @@ jobs:
                 ;;
             esac
           else
-            echo "::error::Isi src_url (link driver 837.0.9) atau src_path (file di repo ini)."
-            echo "::error::Link XDA butuh login, jadi upload dulu ke GitHub Release / GDrive / Mega lalu tempel link-nya."
-            exit 1
+            # Tanpa src_url/src_path: ambil zip dari GitHub Release di repo ini (tag SRC_TAG, default driver-src).
+            # Cara termudah dari HP: Releases -> Draft a new release -> tag "driver-src" -> lampirkan zip -> Publish.
+            TAG="${SRC_TAG:-driver-src}"
+            REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY kosong}"
+            echo "src_url/src_path kosong -> cari zip di release '$TAG' repo $REPO"
+            if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+              echo "::error::Release '$TAG' belum ada di $REPO."
+              echo "::error::Buat dulu: Releases -> Draft a new release -> tag '$TAG' -> lampirkan zip driver 837.0.9 -> Publish."
+              exit 1
+            fi
+            names="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -iE '\.(zip|7z|tar\.gz|tgz|tar\.xz)$' || true)"
+            if [ -z "$names" ]; then
+              echo "::error::Release '$TAG' tidak punya file .zip/.7z/.tar.gz."
+              exit 1
+            fi
+            vpat="$(printf '%s' "${DRIVER_VERSION:-}" | sed 's/\./[._-]/g')"
+            pick=""
+            if [ -n "$vpat" ]; then
+              matches="$(printf '%s\n' "$names" | grep -iE "$vpat" || true)"
+              nm="$(printf '%s' "$matches" | grep -c . || true)"
+              if [ "$nm" -gt 1 ]; then
+                echo "::error::Lebih dari satu file cocok dengan versi ${DRIVER_VERSION}; sisakan satu di release '$TAG' atau pakai src_url:"
+                printf '%s\n' "$matches" | sed 's/^/::error::  - /'
+                exit 1
+              fi
+              pick="$matches"
+            fi
+            if [ -z "$pick" ]; then
+              if [ "$(printf '%s\n' "$names" | wc -l)" = "1" ]; then
+                pick="$names"
+              else
+                echo "::error::Ada beberapa file di release '$TAG' dan tidak ada yang cocok dengan versi ${DRIVER_VERSION:-?}:"
+                printf '%s\n' "$names" | sed 's/^/::error::  - /'
+                exit 1
+              fi
+            fi
+            echo "Pakai asset: $pick"
+            gh release download "$TAG" --repo "$REPO" --pattern "$pick" --dir dl --clobber
           fi
 
           # Tolak halaman HTML (login / captcha / link kedaluwarsa)
@@ -481,10 +527,15 @@ jobs:
                           root = base.joinpath(*rel[:j]) if j > 0 else base
                           roots[root] = roots.get(root, 0) + 1
                           break
+                  else:
+                      # layout flat (zip TWRP): lib/egl atau lib64/egl langsung di root arsip
+                      if len(rel) >= 3 and rel[-2] == "egl" and rel[-3] in ("lib", "lib64"):
+                          root = base.joinpath(*rel[:-3]) if len(rel) > 3 else base
+                          roots[root] = roots.get(root, 0) + 1
               if not roots:
                   cand = [str(p.relative_to(base)) for p in base.rglob("*adreno*.so")][:15]
-                  die("Layout source tidak dikenali: libGLESv2_adreno.so harus ada di vendor/lib64/egl atau "
-                      "system/vendor/lib64/egl. Ditemukan: " + (", ".join(cand) or "(tidak ada file adreno)"))
+                  die("Layout source tidak dikenali: libGLESv2_adreno.so harus ada di lib64/egl, vendor/lib64/egl "
+                      "atau system/vendor/lib64/egl. Ditemukan: " + (", ".join(cand) or "(tidak ada file adreno)"))
               return max(roots.items(), key=lambda kv: kv[1])[0]
 
 
@@ -627,11 +678,47 @@ jobs:
                   return "skip", "vendor/etc di luar daftar aman"
               if rel.startswith("etc/permissions/"):
                   return "keep", "permissions (system)"
+              if rel.startswith("etc/init/"):
+                  return "skip", "init .rc tidak bisa lewat modul (diparse init sebelum modul ter-mount)"
+              if re.match(r"lib(64)?/", rel):
+                  return "skip", "library sistem AOSP (system/lib*) tidak diganti"
               return "skip", "di luar path yang diizinkan"
 
 
           IGNORED_TOP = ("META-INF", "module.prop", "customize.sh", "service.sh", "post-fs-data.sh", "uninstall.sh",
                          "system.prop", "sepolicy.rule", "webroot", "README", "LICENSE", "changelog")
+
+
+          def flat_symlink_target(data):
+              """Symlink yang ke-flatten jadi file teks berisi path target (mis. 'egl/libEGL_adreno.so')."""
+              if len(data) > 200 or data[:4] == b"\x7fELF":
+                  return None
+              try:
+                  t = data.decode("ascii").strip()
+              except UnicodeDecodeError:
+                  return None
+              return t if re.fullmatch(r"[\w./+-]+\.so(\.\d+)*", t) else None
+
+
+          def sanitize_qgl(raw):
+              """qgl_config.txt: UTF-8 tanpa BOM/NUL, LF, tanpa baris duplikat (urutan asli dipertahankan)."""
+              if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+                  text = raw.decode("utf-16", "replace")
+              else:
+                  text = raw.decode("utf-8-sig", "replace")
+              text = text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
+              seen, out, dupes = set(), [], 0
+              for line in text.split("\n"):
+                  line = line.rstrip()
+                  if line and not line.lstrip().startswith("#"):
+                      if line in seen:
+                          dupes += 1
+                          continue
+                      seen.add(line)
+                  out.append(line)
+              while out and not out[-1]:
+                  out.pop()
+              return ("\n".join(out) + "\n").encode("utf-8"), len([x for x in out if x.strip()]), dupes
 
 
           def map_rel(root, f):
@@ -640,6 +727,8 @@ jobs:
                   return "/".join(parts[1:])
               if parts[0] == "vendor":
                   return "/".join(parts)
+              if parts[0] in ("lib", "lib64", "gpu", "firmware") and len(parts) > 1:
+                  return "/".join(["vendor"] + list(parts))  # layout flat -> /vendor/...
               if parts[0].startswith(IGNORED_TOP) or len(parts) == 1:
                   return None
               return "/".join(["_luar"] + list(parts))  # product/odm/system_ext dst -> akan di-skip
@@ -719,8 +808,13 @@ jobs:
                   action, why = decide(rel, blocklist, extra_allow, fw_ok)
                   if action == "skip":
                       skipped.append((rel, why))
-                  else:
-                      kept[rel] = (f, why)
+                      continue
+                  if rel.endswith(".so") and f.stat().st_size < 200:
+                      tgt = flat_symlink_target(f.read_bytes())
+                      if tgt:
+                          skipped.append((rel, f"symlink ke '{tgt}' ikut ke-flatten jadi teks (pakai symlink stock ROM)"))
+                          continue
+                  kept[rel] = (f, why)
               if not kept:
                   die("Tidak ada file yang lolos filter.")
 
@@ -752,7 +846,7 @@ jobs:
                       provided.add(rel.rsplit("/", 1)[-1])
                       for n in needed:
                           all_needed.setdefault(n, []).append(rel)
-                      if rel.endswith("/libGLESv2_adreno.so") or rel.endswith("/vulkan.adreno.so"):
+                      if rel.endswith("/egl/libGLESv2_adreno.so"):
                           found = {f"{int(mj)}.{int(mn)}" for mj, mn in re.findall(rb"V@0*(\d+)\.(\d+)", data)}
                           if found:
                               ver_by_file[rel] = sorted(found)
@@ -798,7 +892,7 @@ jobs:
               for vs in ver_by_file.values():
                   gl_versions.update(vs)
               if not ver_by_file:
-                  warn("string versi 'V@xxxx.x' tidak ditemukan di libGLESv2_adreno.so/vulkan.adreno.so - versi tidak bisa diverifikasi")
+                  warn("string versi 'V@xxxx.x' tidak ditemukan di libGLESv2_adreno.so - versi tidak bisa diverifikasi")
               else:
                   bad = {r: v for r, v in ver_by_file.items() if want_mm not in v}
                   if bad:
@@ -807,7 +901,8 @@ jobs:
                       if same_major:
                           warn(f"minor versi berbeda dari {want_mm}: {detail}")
                       elif a.strict_version:
-                          die(f"Versi di blob tidak cocok dengan {a.version} (campur / source salah?): {detail}")
+                          die(f"Versi di blob tidak cocok dengan {a.version}: {detail}. Jalankan ulang dengan driver_version "
+                              f"yang sesuai (terdeteksi {sorted(gl_versions)}) atau periksa source.")
                       else:
                           warn(f"versi di blob TIDAK cocok dengan {a.version}: {detail}")
 
@@ -833,9 +928,23 @@ jobs:
               for name in ("customize.sh", "post-fs-data.sh", "service.sh", "uninstall.sh"):
                   write_text(modroot / name, render((tpl / name).read_text(), sub), 0o755)
 
+              # qgl_config.txt (dipasang ke /data/vendor/gpu oleh post-fs-data.sh)
+              qgl_info = None
+              qsrc = next(iter(sorted(root.glob("qgl_config.txt"))), None) or next(iter(sorted(base.rglob("qgl_config.txt"))), None)
+              if qsrc:
+                  qdata, qlines, qdupes = sanitize_qgl(qsrc.read_bytes())
+                  (modroot / "qgl_config.txt").write_bytes(qdata)
+                  os.chmod(modroot / "qgl_config.txt", 0o644)
+                  qgl_info = {"lines": qlines, "dupes_removed": qdupes}
+                  print(f"qgl_config.txt: {qlines} baris, {qdupes} duplikat dibuang")
+              else:
+                  print("qgl_config.txt tidak ada di source (dilewati)")
+
               manifest = []
               for rel in sorted(manifest_files):
                   manifest.append(f"{sha256_file(sysroot / rel)}  system/{rel}")
+              if qgl_info:
+                  manifest.append(f"{sha256_file(modroot / 'qgl_config.txt')}  qgl_config.txt")
               write_text(modroot / "ax_manifest.sha256", "\n".join(manifest) + "\n")
 
               # --- zip ------------------------------------------------------------------------------
@@ -873,6 +982,7 @@ jobs:
                   "xml_fixed": [{"path": p, "fixes": n} for p, n in xml_notes],
                   "external_deps": external,
                   "firmware_missing_in_source": fw_missing,
+                  "qgl_config": qgl_info,
                   "warnings": WARNINGS,
                   "blocklist": blocklist,
                   "files": [{"path": f"system/{r}", "sha256": sha256_file(sysroot / r), "why": kept[r][1]} for r in sorted(kept)],
@@ -921,6 +1031,16 @@ jobs:
               L.append("")
               L.append("## Isi paket")
               L.append(f"- {rep['files_kept']} file dipasang ({rep['elf_files']} ELF), {len(rep['skipped'])} file dilewati.")
+              if rep.get("qgl_config"):
+                  q = rep["qgl_config"]
+                  L.append(f"- `qgl_config.txt`: {q['lines']} baris ({q['dupes_removed']} duplikat dibuang), dipasang ke "
+                           "`/data/vendor/gpu/` saat boot; config lama dicadangkan dan dipulihkan saat modul dihapus.")
+              groups = {}
+              for sk in rep["skipped"]:
+                  r = re.sub(r"symlink ke '.*?'", "symlink", sk["reason"])
+                  groups[r] = groups.get(r, 0) + 1
+              for r, n in sorted(groups.items(), key=lambda kv: -kv[1])[:8]:
+                  L.append(f"  - dilewati {n}x: {r}")
               L.append("- Versi driver terdeteksi di blob: " + (", ".join(rep["detected_gl_versions"]) or "tidak terdeteksi"))
               if rep["xml_fixed"]:
                   L.append(f"- {len(rep['xml_fixed'])} file XML diperbaiki otomatis (encoding/BOM/NUL).")
@@ -1003,7 +1123,7 @@ jobs:
                           listed.add(p)
                           if sha256_bytes(zf.read(pre + p)) != h:
                               problems.append(f"{z.name}: hash tidak cocok {p}")
-                      actual = {n[len(pre):] for n in names if n[len(pre):].startswith("system/")}
+                      actual = {n[len(pre):] for n in names if n[len(pre):].startswith("system/") or n[len(pre):] == "qgl_config.txt"}
                       if listed != actual:
                           problems.append(f"{z.name}: manifest != isi system/ ({len(listed)} vs {len(actual)})")
                       # ELF + XML + blocklist
@@ -1144,6 +1264,21 @@ jobs:
             tail -n 300 "$LOG" > "$LOG.tmp" 2>/dev/null && mv "$LOG.tmp" "$LOG"
           fi
 
+          # --- qgl_config.txt (daftar ekstensi Vulkan/GL driver) ----------------------------
+          # Dipasang ke /data/vendor/gpu; config lama dicadangkan sekali (.ax_bak) dan dipulihkan
+          # saat modul dihapus atau bootloop guard memicu.
+          QGL_SRC="$MODDIR/qgl_config.txt"
+          QGL_DIR="${AX_QGL_DIR:-/data/vendor/gpu}"
+          QGL_DST="$QGL_DIR/qgl_config.txt"
+
+          qgl_revert() {
+            if [ -f "$QGL_DST.ax_bak" ]; then
+              mv -f "$QGL_DST.ax_bak" "$QGL_DST"
+            elif [ -f "$QGL_DST" ] && cmp -s "$QGL_SRC" "$QGL_DST"; then
+              rm -f "$QGL_DST"
+            fi
+          }
+
           # --- bootloop guard ------------------------------------------------------------
           n=0
           [ -f "$CNT" ] && n="$(cat "$CNT" 2>/dev/null)"
@@ -1155,8 +1290,19 @@ jobs:
             log "bootloop guard: $((n - 1)) boot berturut-turut tidak selesai -> modul dinonaktifkan"
             touch "$MODDIR/disable"
             [ -d "$MODDIR/system" ] && mv "$MODDIR/system" "$MODDIR/system.off"
+            [ -f "$QGL_SRC" ] && qgl_revert
             rm -f "$CNT"
             exit 0
+          fi
+
+          if [ -f "$QGL_SRC" ]; then
+            mkdir -p "$QGL_DIR" 2>/dev/null
+            if ! cmp -s "$QGL_SRC" "$QGL_DST"; then
+              [ -f "$QGL_DST" ] && [ ! -f "$QGL_DST.ax_bak" ] && cp -f "$QGL_DST" "$QGL_DST.ax_bak"
+              cp -f "$QGL_SRC" "$QGL_DST" && log "qgl_config.txt dipasang ke $QGL_DIR"
+            fi
+            chmod 644 "$QGL_DST" 2>/dev/null
+            restorecon "$QGL_DST" 2>/dev/null
           fi
 
           # --- SELinux context -----------------------------------------------------------
@@ -1215,8 +1361,16 @@ jobs:
 
           cat > ax/tpl/uninstall.sh <<'__AX_EOF_TPL_UNINSTALL__'
           #!/system/bin/sh
-          # Modul systemless: tidak ada perubahan di partisi. Cukup bersihkan log.
-          rm -f /data/local/tmp/ax_adreno730.log /data/local/tmp/ax_adreno730.log.tmp
+          # Modul systemless: partisi tidak diubah. Kembalikan qgl_config.txt lama (kalau ada) lalu bersihkan log.
+          MODDIR=${0%/*}
+          QGL_DIR="${AX_QGL_DIR:-/data/vendor/gpu}"
+          QGL_DST="$QGL_DIR/qgl_config.txt"
+          if [ -f "$QGL_DST.ax_bak" ]; then
+            mv -f "$QGL_DST.ax_bak" "$QGL_DST"
+          elif [ -f "$MODDIR/qgl_config.txt" ] && [ -f "$QGL_DST" ] && cmp -s "$MODDIR/qgl_config.txt" "$QGL_DST"; then
+            rm -f "$QGL_DST"
+          fi
+          rm -f "${AX_LOG:-/data/local/tmp/ax_adreno730.log}" "${AX_LOG:-/data/local/tmp/ax_adreno730.log}.tmp"
           exit 0
           __AX_EOF_TPL_UNINSTALL__
 
@@ -1361,6 +1515,9 @@ jobs:
           SRC_URL: ${{ inputs.src_url }}
           SRC_PATH: ${{ inputs.src_path }}
           SRC_SHA256: ${{ inputs.src_sha256 }}
+          SRC_TAG: ${{ inputs.src_release_tag }}
+          DRIVER_VERSION: ${{ inputs.driver_version }}
+          GH_TOKEN: ${{ github.token }}
         run: bash ax/scripts/fetch_source.sh
 
       - name: Rakit modul + zip TWRP
