@@ -6,29 +6,35 @@
 #    *_Module.zip  -> flash lewat manager (KernelSU-Next / SukiSU / Magisk / MMRL)
 #    *_TWRP.zip    -> flash lewat TWRP / OrangeFox (pasang ke /data/adb/modules)
 #
-#  Sumber driver (Adreno 730, V837.0.9): zip TWRP milik kamu sendiri, mis.
-#  Axion_GPU_Driver_V837_0_9_ingres_QPR2_TWRP.zip (asal @adrenolaboratory).
-#  Layout yang dikenali: flat (lib/ lib64/ gpu/ firmware/ qgl_config.txt system/etc/permissions)
-#  atau module (system/vendor/...).
+#  Sumber driver (source_mode):
+#    global (default)  blob stock Snapdragon 8 Gen 1 (SM8450) dari repo publik TheMuppets
+#                      (branch lineage-23.2 = Android 16 QPR2). Otomatis, tanpa upload apa pun.
+#                      Versi = versi asli blob (stock OEM), BUKAN 837.x.
+#    custom            zip milikmu sendiri (mis. V837.0.9 dari @adrenolaboratory): isi src_url /
+#                      src_path, atau lampirkan di Release bertag "driver-src" repo ini.
+#                      Layout dikenali: flat (lib/ lib64/ gpu/ qgl_config.txt ...) atau module.
 #
-#  Cara pakai (dari HP):
-#    1. Sekali saja: Releases -> Draft a new release -> tag "driver-src" -> lampirkan zip
-#       driver 837.0.9 -> Publish release. (Repo private pun aman, diunduh pakai token repo.)
-#    2. Actions -> "Build Adreno 730 GPU Driver (ingres)" -> Run workflow (default sudah benar).
-#       Kolom src_url / src_path hanya perlu diisi kalau zip TIDAK ada di release driver-src.
-#    Run pertama: matikan publish_release untuk uji dulu (zip ada di Artifacts).
+#  Cara pakai (dari HP): Actions -> "Build Adreno 730 GPU Driver (ingres)" -> Run workflow.
+#  Run pertama: matikan publish_release untuk uji dulu (zip ada di Artifacts).
 # =============================================================================
 name: Build Adreno 730 GPU Driver (ingres)
 
 on:
   workflow_dispatch:
     inputs:
+      source_mode:
+        description: 'global = blob stock Snapdragon 8 Gen 1 publik (otomatis) | custom = zip sendiri'
+        type: choice
+        options:
+          - global
+          - custom
+        default: global
       driver_version:
-        description: 'Versi driver Adreno'
-        required: true
-        default: '837.0.9'
+        description: 'Versi WAJIB cocok (mis. 837.0.9). Kosong = pakai versi asli dari source'
+        required: false
+        default: ''
       src_url:
-        description: 'Link source driver (direct / GDrive / Mega). Kosong = ambil zip dari release driver-src'
+        description: 'Link zip driver sendiri (direct / GDrive / Mega); mengalahkan source_mode'
         required: false
         default: ''
       src_sha256:
@@ -39,10 +45,6 @@ on:
         description: 'Alternatif: path file/folder source di repo ini'
         required: false
         default: ''
-      src_release_tag:
-        description: 'Tag release di repo ini yang berisi zip source (dipakai jika src_url & src_path kosong)'
-        required: false
-        default: 'driver-src'
       tree_branch:
         description: 'Branch Tree_ingres'
         required: false
@@ -103,8 +105,8 @@ jobs:
           DRIVER_VERSION: ${{ inputs.driver_version }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$DRIVER_VERSION" | grep -qE '^[0-9]+(\.[0-9]+){1,3}$'; then
-            echo "::error::driver_version tidak valid: '$DRIVER_VERSION' (contoh 837.0.9)"
+          if [ -n "$DRIVER_VERSION" ] && ! printf '%s' "$DRIVER_VERSION" | grep -qE '^[0-9]+(\.[0-9]+){1,3}$'; then
+            echo "::error::driver_version tidak valid: '$DRIVER_VERSION' (contoh 837.0.9, atau kosongkan)"
             exit 1
           fi
 
@@ -266,16 +268,118 @@ jobs:
 
           cat > ax/scripts/fetch_source.sh <<'__AX_EOF_FETCH_SOURCE__'
           #!/usr/bin/env bash
-          # Ambil source driver Adreno (SRC_PATH di repo ini, atau SRC_URL) ke folder dl/
-          # Env: SRC_URL, SRC_PATH, SRC_SHA256, SRC_TAG, DRIVER_VERSION, GH_TOKEN, GITHUB_REPOSITORY
+          # Ambil source driver Adreno ke folder dl/ dan tulis deskripsi sumber ke out/source.txt
+          #
+          # Urutan:  SRC_PATH (file di repo)  >  SRC_URL  >  mode:
+          #   SRC_MODE=global (default)  blob stock Snapdragon 8 Gen 1 (SM8450) dari repo publik (TheMuppets)
+          #   SRC_MODE=custom            zip milikmu di GitHub Release (tag SRC_TAG, default driver-src)
+          #
+          # Env: SRC_MODE, SRC_URL, SRC_PATH, SRC_SHA256, SRC_TAG, DRIVER_VERSION, GH_TOKEN, GITHUB_REPOSITORY
+          #      GLOBAL_REPO / GLOBAL_BRANCH / GLOBAL_URL (opsional, untuk mengganti sumber global)
           set -euo pipefail
 
-          rm -rf dl && mkdir -p dl
+          rm -rf dl && mkdir -p dl out
+          : > out/source.txt
+          note() { printf '%s\n' "$*" >> out/source.txt; }
+
+          fetch_global() {
+            local repo="${GLOBAL_REPO:-TheMuppets/proprietary_vendor_xiaomi_sm8450-common}"
+            local url="${GLOBAL_URL:-https://github.com/$repo.git}"
+            local want="${GLOBAL_BRANCH:-lineage-23.2}" br tmp sha date
+            echo "Mode global: blob stock Snapdragon 8 Gen 1 dari $repo"
+
+            if ! git ls-remote --heads "$url" >/dev/null 2>&1; then
+              echo "::error::Repo sumber global tidak bisa diakses: $url"
+              echo "::error::Pakai source_mode=custom dan zip milikmu (release 'driver-src' / src_url)."
+              exit 1
+            fi
+            if git ls-remote --exit-code --heads "$url" "$want" >/dev/null 2>&1; then
+              br="$want"
+            else
+              br="$(git ls-remote --heads "$url" 'lineage-*' | sed 's#.*refs/heads/##' | sort -V | tail -n 1)"
+              [ -n "$br" ] || { echo "::error::Tidak ada branch lineage-* di $url"; exit 1; }
+              echo "::warning::Branch $want tidak ada, pakai $br"
+            fi
+
+            tmp="$(mktemp -d)"
+            git clone -q --depth 1 --filter=blob:none --sparse -b "$br" "$url" "$tmp/g"
+            git -C "$tmp/g" sparse-checkout set --no-cone \
+              '/proprietary/vendor/lib/egl/' \
+              '/proprietary/vendor/lib64/egl/' \
+              '/proprietary/vendor/lib/hw/vulkan.adreno.so' \
+              '/proprietary/vendor/lib64/hw/vulkan.adreno.so' \
+              '/proprietary/vendor/lib*/libgsl.so' \
+              '/proprietary/vendor/lib*/libadreno_utils.so' \
+              '/proprietary/vendor/lib*/libadreno_app_profiles.so' \
+              '/proprietary/vendor/lib*/libllvm-qgl.so' \
+              '/proprietary/vendor/lib*/libCB.so' \
+              '/proprietary/vendor/gpu/' \
+              '/proprietary/vendor/firmware/a730_sqe.fw' \
+              '/proprietary/vendor/firmware/gmu_gen70000.bin'
+
+            if [ ! -f "$tmp/g/proprietary/vendor/lib64/egl/libGLESv2_adreno.so" ]; then
+              echo "::error::libGLESv2_adreno.so tidak ada di $repo@$br (struktur repo berubah?)"
+              exit 1
+            fi
+            mkdir -p dl/vendor
+            cp -a "$tmp/g/proprietary/vendor/." dl/vendor/
+            sha="$(git -C "$tmp/g" rev-parse --short=10 HEAD)"
+            date="$(git -C "$tmp/g" log -1 --format=%cs)"
+            rm -rf "$tmp"
+
+            note "Mode global (publik): blob stock Snapdragon 8 Gen 1 (SM8450) dari \`$repo\` branch \`$br\` commit \`$sha\` ($date)."
+            note "Ini driver stock OEM, bukan build komunitas 837.x; kemungkinan sama atau mirip dengan driver yang sudah ada di ROM. Untuk 837.x pakai source_mode=custom dengan zip sendiri."
+            echo "Sumber global: $repo@$br ($sha, $date)"
+          }
+
+          fetch_release() {
+            # Ambil zip dari GitHub Release di repo ini (tag SRC_TAG, default driver-src).
+            # Dari HP: Releases -> Draft a new release -> tag "driver-src" -> lampirkan zip -> Publish.
+            local TAG="${SRC_TAG:-driver-src}"
+            local REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY kosong}"
+            local names vpat pick="" matches nm
+            echo "source_mode=custom tanpa src_url/src_path -> cari zip di release '$TAG' repo $REPO"
+            if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+              echo "::error::Release '$TAG' belum ada di $REPO."
+              echo "::error::Buat dulu: Releases -> Draft a new release -> tag '$TAG' -> lampirkan zip driver -> Publish."
+              echo "::error::Atau jalankan dengan source_mode=global (otomatis, driver stock Snapdragon 8 Gen 1)."
+              exit 1
+            fi
+            names="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -iE '\.(zip|7z|tar\.gz|tgz|tar\.xz)$' || true)"
+            if [ -z "$names" ]; then
+              echo "::error::Release '$TAG' tidak punya file .zip/.7z/.tar.gz."
+              exit 1
+            fi
+            vpat="$(printf '%s' "${DRIVER_VERSION:-}" | sed 's/\./[._-]/g')"
+            if [ -n "$vpat" ]; then
+              matches="$(printf '%s\n' "$names" | grep -iE "$vpat" || true)"
+              nm="$(printf '%s' "$matches" | grep -c . || true)"
+              if [ "$nm" -gt 1 ]; then
+                echo "::error::Lebih dari satu file cocok dengan versi ${DRIVER_VERSION}; sisakan satu di release '$TAG' atau pakai src_url:"
+                printf '%s\n' "$matches" | sed 's/^/::error::  - /'
+                exit 1
+              fi
+              pick="$matches"
+            fi
+            if [ -z "$pick" ]; then
+              if [ "$(printf '%s\n' "$names" | wc -l)" = "1" ]; then
+                pick="$names"
+              else
+                echo "::error::Ada beberapa file di release '$TAG' dan tidak ada yang cocok dengan versi '${DRIVER_VERSION:-(kosong)}':"
+                printf '%s\n' "$names" | sed 's/^/::error::  - /'
+                exit 1
+              fi
+            fi
+            echo "Pakai asset: $pick"
+            gh release download "$TAG" --repo "$REPO" --pattern "$pick" --dir dl --clobber
+            note "Mode custom: zip \`$pick\` dari release \`$TAG\` di repo ini."
+          }
 
           if [ -n "${SRC_PATH:-}" ]; then
             [ -e "$SRC_PATH" ] || { echo "::error::src_path tidak ditemukan di repo: $SRC_PATH"; exit 1; }
             cp -a "$SRC_PATH" dl/
             echo "Source dari repo: $SRC_PATH"
+            note "Mode custom: file \`$SRC_PATH\` dari repo ini."
           elif [ -n "${SRC_URL:-}" ]; then
             case "$SRC_URL" in
               https://*|http://*) ;;
@@ -298,45 +402,11 @@ jobs:
                   -A 'Mozilla/5.0 (X11; Linux x86_64)' -o dl/source.download "$SRC_URL"
                 ;;
             esac
+            note "Mode custom: diunduh dari \`${SRC_URL%%\?*}\`."
+          elif [ "${SRC_MODE:-global}" = "custom" ]; then
+            fetch_release
           else
-            # Tanpa src_url/src_path: ambil zip dari GitHub Release di repo ini (tag SRC_TAG, default driver-src).
-            # Cara termudah dari HP: Releases -> Draft a new release -> tag "driver-src" -> lampirkan zip -> Publish.
-            TAG="${SRC_TAG:-driver-src}"
-            REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY kosong}"
-            echo "src_url/src_path kosong -> cari zip di release '$TAG' repo $REPO"
-            if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-              echo "::error::Release '$TAG' belum ada di $REPO."
-              echo "::error::Buat dulu: Releases -> Draft a new release -> tag '$TAG' -> lampirkan zip driver 837.0.9 -> Publish."
-              exit 1
-            fi
-            names="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -iE '\.(zip|7z|tar\.gz|tgz|tar\.xz)$' || true)"
-            if [ -z "$names" ]; then
-              echo "::error::Release '$TAG' tidak punya file .zip/.7z/.tar.gz."
-              exit 1
-            fi
-            vpat="$(printf '%s' "${DRIVER_VERSION:-}" | sed 's/\./[._-]/g')"
-            pick=""
-            if [ -n "$vpat" ]; then
-              matches="$(printf '%s\n' "$names" | grep -iE "$vpat" || true)"
-              nm="$(printf '%s' "$matches" | grep -c . || true)"
-              if [ "$nm" -gt 1 ]; then
-                echo "::error::Lebih dari satu file cocok dengan versi ${DRIVER_VERSION}; sisakan satu di release '$TAG' atau pakai src_url:"
-                printf '%s\n' "$matches" | sed 's/^/::error::  - /'
-                exit 1
-              fi
-              pick="$matches"
-            fi
-            if [ -z "$pick" ]; then
-              if [ "$(printf '%s\n' "$names" | wc -l)" = "1" ]; then
-                pick="$names"
-              else
-                echo "::error::Ada beberapa file di release '$TAG' dan tidak ada yang cocok dengan versi ${DRIVER_VERSION:-?}:"
-                printf '%s\n' "$names" | sed 's/^/::error::  - /'
-                exit 1
-              fi
-            fi
-            echo "Pakai asset: $pick"
-            gh release download "$TAG" --repo "$REPO" --pattern "$pick" --dir dl --clobber
+            fetch_global
           fi
 
           # Tolak halaman HTML (login / captcha / link kedaluwarsa)
@@ -700,6 +770,19 @@ jobs:
               return t if re.fullmatch(r"[\w./+-]+\.so(\.\d+)*", t) else None
 
 
+          def detect_gl_version(base):
+              """Versi driver ('615.95', '837.0') dari string 'V@0615.95' di libGLESv2_adreno.so (ELF asli saja)."""
+              found = set()
+              for f in sorted(base.rglob("libGLESv2_adreno.so")):
+                  if f.is_symlink() or not f.is_file():
+                      continue
+                  data = f.read_bytes()
+                  if data[:4] != b"\x7fELF":
+                      continue
+                  found.update(f"{int(mj)}.{int(mn)}" for mj, mn in re.findall(rb"V@0*(\d+)\.(\d+)", data))
+              return sorted(found)
+
+
           def sanitize_qgl(raw):
               """qgl_config.txt: UTF-8 tanpa BOM/NUL, LF, tanpa baris duplikat (urutan asli dipertahankan)."""
               if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
@@ -768,11 +851,11 @@ jobs:
               work = Path(a.work)
               tpl = Path(a.tpl)
 
-              if not re.fullmatch(r"\d+(\.\d+){1,3}", a.version):
-                  die(f"format versi tidak valid: {a.version} (contoh 837.0.9)")
-              vparts = [int(x) for x in a.version.split(".")] + [0, 0, 0]
+              a.version = (a.version or "").strip()
+              auto_version = a.version.lower() in ("", "auto")
+              if not auto_version and not re.fullmatch(r"\d+(\.\d+){1,3}", a.version):
+                  die(f"format versi tidak valid: {a.version} (contoh 837.0.9, atau kosong = otomatis)")
               rev = int(os.environ.get("GITHUB_RUN_NUMBER", "0") or 0) % 100
-              vcode = (vparts[0] * 10000 + vparts[1] * 100 + vparts[2]) * 100 + rev
 
               blocklist = list(DEFAULT_BLOCKLIST)
               for pat in re.split(r"[\s,]+", a.extra_blocklist.strip()):
@@ -793,6 +876,17 @@ jobs:
               expand_nested(base)
               root = find_root(base)
               print(f"root driver: {root.relative_to(base) or '.'}")
+
+              if auto_version:
+                  det = detect_gl_version(base)
+                  if len(det) != 1:
+                      die("versi driver tidak bisa dideteksi otomatis (terdeteksi: "
+                          + (", ".join(det) or "tidak ada")
+                          + "). Isi driver_version manual, mis. 837.0.9.")
+                  a.version = det[0]
+                  print(f"versi driver terdeteksi otomatis dari blob: {a.version}")
+              vparts = [int(x) for x in a.version.split(".")] + [0, 0, 0]
+              vcode = (vparts[0] * 10000 + vparts[1] * 100 + vparts[2]) * 100 + rev
 
               # --- kumpulkan & putuskan --------------------------------------------------
               kept, skipped = {}, []
@@ -1004,6 +1098,7 @@ jobs:
                       fh.write(f"module_zip={z_mod.name}\n")
                       fh.write(f"twrp_zip={z_rec.name}\n")
                       fh.write(f"tag={tag}\n")
+                      fh.write(f"version={a.version}\n")
 
 
           def write_notes(out, a, rep, z_mod, z_rec, facts):
@@ -1013,6 +1108,12 @@ jobs:
               L.append("Driver GPU userspace Adreno 730 untuk **AOSP / Android 16 QPR2** (AxionOS / LineageOS 23.2). "
                        "Dipasang systemless sebagai modul, tidak menulis ke partisi vendor.")
               L.append("")
+              si = Path(a.source_info) if getattr(a, "source_info", "") else None
+              if si and si.is_file() and si.read_text().strip():
+                  L.append("## Sumber driver")
+                  for line in si.read_text().strip().splitlines():
+                      L.append(f"- {line.strip()}")
+                  L.append("")
               L.append("## File")
               L.append(f"- `{z_mod.name}`: flash lewat manager (KernelSU-Next / SukiSU / Magisk / MMRL)")
               L.append(f"- `{z_rec.name}`: flash lewat TWRP / OrangeFox (pasang ke `/data/adb/modules`, root harus sudah terpasang)")
@@ -1170,6 +1271,7 @@ jobs:
               p.add_argument("--extra-allow", default="")
               p.add_argument("--include-firmware", action="store_true")
               p.add_argument("--strict-version", action="store_true")
+              p.add_argument("--source-info", default="", help="file teks deskripsi sumber (ditampilkan di RELEASE_NOTES)")
               v = sp.add_parser("verify")
               v.add_argument("--out", required=True)
               v.add_argument("--work", default="work")
@@ -1512,15 +1614,17 @@ jobs:
 
       - name: Ambil source driver
         env:
+          SRC_MODE: ${{ inputs.source_mode }}
           SRC_URL: ${{ inputs.src_url }}
           SRC_PATH: ${{ inputs.src_path }}
           SRC_SHA256: ${{ inputs.src_sha256 }}
-          SRC_TAG: ${{ inputs.src_release_tag }}
+          SRC_TAG: driver-src
           DRIVER_VERSION: ${{ inputs.driver_version }}
           GH_TOKEN: ${{ github.token }}
         run: bash ax/scripts/fetch_source.sh
 
       - name: Rakit modul + zip TWRP
+        id: pack
         env:
           DRIVER_VERSION: ${{ inputs.driver_version }}
           INCLUDE_FW: ${{ inputs.include_firmware }}
@@ -1530,7 +1634,8 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y -qq p7zip-full >/dev/null 2>&1 || true
           args=(pack --src dl --version "$DRIVER_VERSION" --tpl ax/tpl --out out --work work
-                --facts out/kgsl-compat.json --extra-blocklist "$EXTRA_BLOCKLIST" --strict-version)
+                --facts out/kgsl-compat.json --extra-blocklist "$EXTRA_BLOCKLIST" --strict-version
+                --source-info out/source.txt)
           if [ "$INCLUDE_FW" = "true" ]; then args+=(--include-firmware); fi
           python3 ax/scripts/adreno_pack.py "${args[@]}"
 
@@ -1551,7 +1656,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: adreno730-ingres-${{ inputs.driver_version }}
+          name: adreno730-ingres-${{ steps.pack.outputs.version }}
           path: |
             out/*.zip
             out/sha256sums.txt
@@ -1564,7 +1669,7 @@ jobs:
         if: ${{ inputs.publish_release }}
         env:
           GH_TOKEN: ${{ github.token }}
-          DRIVER_VERSION: ${{ inputs.driver_version }}
+          DRIVER_VERSION: ${{ steps.pack.outputs.version }}
           PRERELEASE: ${{ inputs.prerelease }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
