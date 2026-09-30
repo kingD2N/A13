@@ -1,43 +1,23 @@
 # =============================================================================
-#  Adreno 730 GPU Driver - POCO F4 GT (ingres) - AOSP Android 16 QPR2
-#  by kingD2N
-#
-#  Hasil rilis:
-#    *_Module.zip  -> flash lewat manager (KernelSU-Next / SukiSU / Magisk / MMRL)
-#    *_TWRP.zip    -> flash lewat TWRP / OrangeFox (pasang ke /data/adb/modules)
-#
-#  Sumber driver (source_mode):
-#    latest (default)  otomatis cari driver stock Adreno 730 VERSI TERTINGGI di repo blob publik
-#                      (TheMuppets: Xiaomi/Sony SM8450, Nothing/Motorola SM8475), lengkap 32+64 bit.
-#                      Setiap Run workflow memindai ulang, jadi kalau ada versi baru ikut terbaru.
-#    stock             blob Xiaomi SM8450 (sama seperti stock ingres), versi dipatok.
-#    custom            zip milikmu sendiri (mis. V837.0.9 dari @adrenolaboratory): isi src_url /
-#                      src_path, atau lampirkan di Release bertag "driver-src" repo ini.
-#                      Layout dikenali: flat (lib/ lib64/ gpu/ qgl_config.txt ...) atau module.
-#  Versi 837.x bukan driver OEM, jadi tidak ada di repo publik: hanya lewat mode custom.
-#
-#  Cara pakai (dari HP): Actions -> "Build Adreno 730 GPU Driver (ingres)" -> Run workflow.
-#  Run pertama: matikan publish_release untuk uji dulu (zip ada di Artifacts).
-# =============================================================================
 name: Build Adreno 730 GPU Driver (ingres)
 
 on:
   workflow_dispatch:
     inputs:
       source_mode:
-        description: 'latest = versi stock tertinggi yang publik (otomatis) | stock = blob Xiaomi SM8450 | custom = zip sendiri'
+        description: 'custom = zip 837.0.9 default / src_url | latest = stock publik tertinggi | stock = blob Xiaomi SM8450'
         type: choice
         options:
+          - custom
           - latest
           - stock
-          - custom
-        default: latest
+        default: custom
       driver_version:
-        description: 'Versi WAJIB cocok (mis. 837.0.9). Kosong = pakai versi asli dari source'
+        description: 'Versi WAJIB cocok untuk zip custom (kosong = versi asli dari zip). latest/stock mengabaikan ini'
         required: false
-        default: ''
+        default: '837.0.9'
       src_url:
-        description: 'Link zip driver sendiri (direct / GDrive / Mega); mengalahkan source_mode'
+        description: 'Kosong = zip default (release GPU). Isi untuk zip lain (direct / GitHub release / GDrive / Mega)'
         required: false
         default: ''
       src_sha256:
@@ -74,6 +54,7 @@ permissions:
 
 env:
   TREE_REPO: kingD2N/Tree_ingres
+  DEFAULT_SRC_URL: https://github.com/kingD2N/QGL_VK_TES/releases/download/GPU/Axion_GPU_Driver_V837_0_9_ingres_QPR2_TWRP.zip
 
 defaults:
   run:
@@ -104,14 +85,23 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Validasi input
+        id: input
         env:
           DRIVER_VERSION: ${{ inputs.driver_version }}
+          SRC_MODE: ${{ inputs.source_mode }}
+          SRC_URL: ${{ inputs.src_url }}
+          SRC_PATH: ${{ inputs.src_path }}
         run: |
           set -euo pipefail
           if [ -n "$DRIVER_VERSION" ] && ! printf '%s' "$DRIVER_VERSION" | grep -qE '^[0-9]+(\.[0-9]+){1,3}$'; then
             echo "::error::driver_version tidak valid: '$DRIVER_VERSION' (contoh 837.0.9, atau kosongkan)"
             exit 1
           fi
+          # versi wajib hanya untuk zip sendiri; mode latest/stock memakai versi asli blob
+          req="$DRIVER_VERSION"
+          if [ "$SRC_MODE" != "custom" ] && [ -z "$SRC_URL" ] && [ -z "$SRC_PATH" ]; then req=""; fi
+          echo "version=$req" >> "$GITHUB_OUTPUT"
+          echo "Mode: $SRC_MODE | versi wajib: ${req:-(otomatis dari source)}"
 
       - name: Tulis skrip packager
         run: |
@@ -274,12 +264,12 @@ jobs:
           # Ambil source driver Adreno ke folder dl/ dan tulis deskripsi sumber ke out/source.txt
           #
           # Urutan:  SRC_PATH (file di repo)  >  SRC_URL  >  mode:
-          #   SRC_MODE=latest (default)  driver stock Adreno 730 versi TERTINGGI dari repo blob publik (find_latest.py)
+          #   SRC_MODE=custom (default)  zip default DEFAULT_SRC_URL (mis. release GPU di repo ini) atau src_url / src_path
+          #   SRC_MODE=latest            driver stock Adreno 730 versi TERTINGGI dari repo blob publik (find_latest.py)
           #   SRC_MODE=stock             blob stock Xiaomi SM8450 (sama seperti ROM ingres), versi dipatok
-          #   SRC_MODE=custom            zip milikmu di GitHub Release (tag SRC_TAG, default driver-src)
           #
-          # Env: SRC_MODE, SRC_URL, SRC_PATH, SRC_SHA256, SRC_TAG, DRIVER_VERSION, GH_TOKEN, GITHUB_REPOSITORY
-          #      GLOBAL_REPO / GLOBAL_BRANCH / GLOBAL_URL (mode stock), LATEST_CANDIDATES / PREFER_BRANCH (mode latest)
+          # Env: SRC_MODE, SRC_URL, SRC_PATH, SRC_SHA256, DEFAULT_SRC_URL, GH_TOKEN
+          #      GLOBAL_REPO / GLOBAL_BRANCH / GLOBAL_URL (mode stock), LATEST_CANDIDATES / PREFER_BRANCH / GLOBAL_BASE_URL (mode latest)
           set -euo pipefail
 
           rm -rf dl && mkdir -p dl out
@@ -293,7 +283,7 @@ jobs:
 
             if ! git ls-remote --heads "$url" >/dev/null 2>&1; then
               echo "::error::Repo sumber publik tidak bisa diakses: $url"
-              echo "::error::Pakai source_mode=custom dan zip milikmu (release 'driver-src' / src_url), atau coba lagi nanti."
+              echo "::error::Coba lagi nanti, atau pakai source_mode=custom."
               exit 1
             fi
             if git ls-remote --exit-code --heads "$url" "$want" >/dev/null 2>&1; then
@@ -367,82 +357,63 @@ jobs:
           PYSCAN
           }
 
-          fetch_release() {
-            # Ambil zip dari GitHub Release di repo ini (tag SRC_TAG, default driver-src).
-            # Dari HP: Releases -> Draft a new release -> tag "driver-src" -> lampirkan zip -> Publish.
-            local TAG="${SRC_TAG:-driver-src}"
-            local REPO="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY kosong}"
-            local names vpat pick="" matches nm
-            echo "source_mode=custom tanpa src_url/src_path -> cari zip di release '$TAG' repo $REPO"
-            if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-              echo "::error::Release '$TAG' belum ada di $REPO."
-              echo "::error::Buat dulu: Releases -> Draft a new release -> tag '$TAG' -> lampirkan zip driver -> Publish."
-              echo "::error::Atau jalankan dengan source_mode=latest (otomatis, driver stock Adreno 730 terbaru yang publik)."
-              exit 1
-            fi
-            names="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -iE '\.(zip|7z|tar\.gz|tgz|tar\.xz)$' || true)"
-            if [ -z "$names" ]; then
-              echo "::error::Release '$TAG' tidak punya file .zip/.7z/.tar.gz."
-              exit 1
-            fi
-            vpat="$(printf '%s' "${DRIVER_VERSION:-}" | sed 's/\./[._-]/g')"
-            if [ -n "$vpat" ]; then
-              matches="$(printf '%s\n' "$names" | grep -iE "$vpat" || true)"
-              nm="$(printf '%s' "$matches" | grep -c . || true)"
-              if [ "$nm" -gt 1 ]; then
-                echo "::error::Lebih dari satu file cocok dengan versi ${DRIVER_VERSION}; sisakan satu di release '$TAG' atau pakai src_url:"
-                printf '%s\n' "$matches" | sed 's/^/::error::  - /'
-                exit 1
+          # download_url <url> -> dl/   (release GitHub lewat gh + token repo; Drive/Mega/lainnya sesuai jenis link)
+          download_url() {
+            local url="$1" o r tag asset
+            case "$url" in
+              https://*|http://*) ;;
+              *) echo "::error::src_url harus diawali http(s)://"; exit 1 ;;
+            esac
+            local gh_re='^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/([^/?#]+)$'
+            if [[ "$url" =~ $gh_re ]]; then
+              o="${BASH_REMATCH[1]}"; r="${BASH_REMATCH[2]}"; tag="${BASH_REMATCH[3]}"; asset="${BASH_REMATCH[4]}"
+              echo "Unduh dari GitHub Release $o/$r (tag $tag): $asset"
+              if command -v gh >/dev/null 2>&1 && gh release download "$tag" --repo "$o/$r" --pattern "$asset" --dir dl --clobber; then
+                return 0
               fi
-              pick="$matches"
+              echo "::warning::gh gagal mengunduh, mencoba curl (hanya bekerja untuk repo publik)"
             fi
-            if [ -z "$pick" ]; then
-              if [ "$(printf '%s\n' "$names" | wc -l)" = "1" ]; then
-                pick="$names"
-              else
-                echo "::error::Ada beberapa file di release '$TAG' dan tidak ada yang cocok dengan versi '${DRIVER_VERSION:-(kosong)}':"
-                printf '%s\n' "$names" | sed 's/^/::error::  - /'
-                exit 1
-              fi
-            fi
-            echo "Pakai asset: $pick"
-            gh release download "$TAG" --repo "$REPO" --pattern "$pick" --dir dl --clobber
-            note "Mode custom: zip \`$pick\` dari release \`$TAG\` di repo ini."
+            case "$url" in
+              *drive.google.com*|*docs.google.com*)
+                echo "Unduh via gdown (Google Drive)"
+                python3 -m pip install --quiet --break-system-packages gdown || python3 -m pip install --quiet gdown
+                python3 -m gdown --fuzzy "$url" -O dl/
+                ;;
+              *mega.nz*|*mega.co.nz*)
+                echo "Unduh via megatools (Mega)"
+                sudo apt-get update -qq && sudo apt-get install -y -qq megatools >/dev/null
+                megadl --path dl "$url"
+                ;;
+              *)
+                echo "Unduh via curl"
+                curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 --max-time 1200 \
+                  -A 'Mozilla/5.0 (X11; Linux x86_64)' -o "dl/$(basename "${url%%\?*}")" "$url"
+                ;;
+            esac
           }
+
+          URL="${SRC_URL:-}"
+          if [ -z "${SRC_PATH:-}" ] && [ -z "$URL" ] && [ "${SRC_MODE:-custom}" = "custom" ]; then
+            URL="${DEFAULT_SRC_URL:-}"
+            if [ -z "$URL" ]; then
+              echo "::error::source_mode=custom butuh src_url atau src_path (tidak ada zip default)."
+              exit 1
+            fi
+            echo "Memakai zip default: $URL"
+          fi
 
           if [ -n "${SRC_PATH:-}" ]; then
             [ -e "$SRC_PATH" ] || { echo "::error::src_path tidak ditemukan di repo: $SRC_PATH"; exit 1; }
             cp -a "$SRC_PATH" dl/
             echo "Source dari repo: $SRC_PATH"
             note "Mode custom: file \`$SRC_PATH\` dari repo ini."
-          elif [ -n "${SRC_URL:-}" ]; then
-            case "$SRC_URL" in
-              https://*|http://*) ;;
-              *) echo "::error::src_url harus diawali http(s)://"; exit 1 ;;
-            esac
-            case "$SRC_URL" in
-              *drive.google.com*|*docs.google.com*)
-                echo "Unduh via gdown (Google Drive)"
-                python3 -m pip install --quiet --break-system-packages gdown || python3 -m pip install --quiet gdown
-                python3 -m gdown --fuzzy "$SRC_URL" -O dl/
-                ;;
-              *mega.nz*|*mega.co.nz*)
-                echo "Unduh via megatools (Mega)"
-                sudo apt-get update -qq && sudo apt-get install -y -qq megatools >/dev/null
-                megadl --path dl "$SRC_URL"
-                ;;
-              *)
-                echo "Unduh via curl"
-                curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 --max-time 1200 \
-                  -A 'Mozilla/5.0 (X11; Linux x86_64)' -o dl/source.download "$SRC_URL"
-                ;;
-            esac
-            note "Mode custom: diunduh dari \`${SRC_URL%%\?*}\`."
+          elif [ -n "$URL" ]; then
+            download_url "$URL"
+            note "Mode custom: zip diunduh dari \`${URL%%\?*}\`."
           else
-            case "${SRC_MODE:-latest}" in
-              custom) fetch_release ;;
+            case "${SRC_MODE:-custom}" in
               stock)  fetch_stock ;;
-              latest|global|"") fetch_latest ;;
+              latest|global) fetch_latest ;;
               *) echo "::error::source_mode tidak dikenal: ${SRC_MODE}"; exit 1 ;;
             esac
           fi
@@ -932,6 +903,8 @@ jobs:
               m = re.match(r"vendor/lib(64)?/(.*)$", rel)
               if m:
                   sub = m.group(2)
+                  if re.search(r"_angle\.so$|(^|/)vulkan\.pastel\.so$", sub):
+                      return "skip", "ANGLE/Pastel bukan komponen Adreno (dari AOSP, pakai versi ROM)"
                   if sub.startswith("hw/"):
                       if re.fullmatch(r"hw/vulkan\.[A-Za-z0-9_]+\.so", sub):
                           return "keep", "HAL Vulkan"
@@ -1552,6 +1525,12 @@ jobs:
           done
           rm -f "$MODPATH/.boot_count" "$MODPATH/disable"
 
+          # shader cache aplikasi dibuat dengan driver lama -> hapus (cache dibuat ulang otomatis)
+          ui_print "- Hapus shader cache aplikasi..."
+          for u in user_de user; do
+            [ -d "/data/$u" ] && find "/data/$u" -path '*/code_cache/*' -name '*shaders_cache*' -type f -exec rm -f {} \; 2>/dev/null
+          done
+
           ui_print "- Selesai. Reboot untuk mengaktifkan driver."
           ui_print "- Bootloop guard: 3x gagal boot berturut-turut -> modul nonaktif otomatis."
           ui_print "- Log: /data/local/tmp/ax_adreno730.log"
@@ -1630,7 +1609,8 @@ jobs:
             fi
             case "$c" in u:object_r:*:*) echo "$c"; return ;; esac
             case "$rel" in
-              /vendor/lib*/egl|/vendor/lib*/egl/*|/vendor/lib*/hw/vulkan.*|/vendor/lib*/libadreno_utils.so|/vendor/lib*/libgsl.so|/vendor/lib*/libCB.so|/vendor/lib*/libllvm-*.so|/vendor/lib*/libq3dtools_adreno.so|/vendor/lib*/libVkLayer_*|/vendor/lib*/libOpenCL*|/vendor/lib*/libGLES*|/vendor/lib*/libEGL*|/vendor/lib*/eglSubDriver*)
+              /vendor/lib*/egl|/vendor/lib*/egl/*|/vendor/lib*/hw/vulkan.*|/vendor/lib*/*.so|/vendor/gpu/kbc/*)
+                # sama seperti files.sh installer asli: semua .so vendor & kbc berlabel same_process_hal_file
                 echo u:object_r:same_process_hal_file:s0 ;;
               /vendor/etc|/vendor/etc/*) echo u:object_r:vendor_configs_file:s0 ;;
               /vendor|/vendor/*) echo u:object_r:vendor_file:s0 ;;
@@ -1803,6 +1783,12 @@ jobs:
           rm -f "$MODS/$ID/.boot_count" "$MODS/$ID/disable" "$MODS/$ID/remove"
           sync
 
+          # shader cache aplikasi dibuat dengan driver lama -> hapus (cache dibuat ulang otomatis)
+          ui_print "- Hapus shader cache aplikasi..."
+          for u in user_de user; do
+            [ -d "$DATA/$u" ] && find "$DATA/$u" -path '*/code_cache/*' -name '*shaders_cache*' -type f -exec rm -f {} \; 2>/dev/null
+          done
+
           rm -rf "$TMP"
           ui_print "- Terpasang: $MODS/$ID"
           ui_print "- Reboot system untuk mengaktifkan driver."
@@ -1825,15 +1811,14 @@ jobs:
           SRC_URL: ${{ inputs.src_url }}
           SRC_PATH: ${{ inputs.src_path }}
           SRC_SHA256: ${{ inputs.src_sha256 }}
-          SRC_TAG: driver-src
-          DRIVER_VERSION: ${{ inputs.driver_version }}
+          DEFAULT_SRC_URL: ${{ env.DEFAULT_SRC_URL }}
           GH_TOKEN: ${{ github.token }}
         run: bash ax/scripts/fetch_source.sh
 
       - name: Rakit modul + zip TWRP
         id: pack
         env:
-          DRIVER_VERSION: ${{ inputs.driver_version }}
+          DRIVER_VERSION: ${{ steps.input.outputs.version }}
           INCLUDE_FW: ${{ inputs.include_firmware }}
           EXTRA_BLOCKLIST: ${{ inputs.extra_blocklist }}
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
