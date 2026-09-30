@@ -7,12 +7,14 @@
 #    *_TWRP.zip    -> flash lewat TWRP / OrangeFox (pasang ke /data/adb/modules)
 #
 #  Sumber driver (source_mode):
-#    global (default)  blob stock Snapdragon 8 Gen 1 (SM8450) dari repo publik TheMuppets
-#                      (branch lineage-23.2 = Android 16 QPR2). Otomatis, tanpa upload apa pun.
-#                      Versi = versi asli blob (stock OEM), BUKAN 837.x.
+#    latest (default)  otomatis cari driver stock Adreno 730 VERSI TERTINGGI di repo blob publik
+#                      (TheMuppets: Xiaomi/Sony SM8450, Nothing/Motorola SM8475), lengkap 32+64 bit.
+#                      Setiap Run workflow memindai ulang, jadi kalau ada versi baru ikut terbaru.
+#    stock             blob Xiaomi SM8450 (sama seperti stock ingres), versi dipatok.
 #    custom            zip milikmu sendiri (mis. V837.0.9 dari @adrenolaboratory): isi src_url /
 #                      src_path, atau lampirkan di Release bertag "driver-src" repo ini.
 #                      Layout dikenali: flat (lib/ lib64/ gpu/ qgl_config.txt ...) atau module.
+#  Versi 837.x bukan driver OEM, jadi tidak ada di repo publik: hanya lewat mode custom.
 #
 #  Cara pakai (dari HP): Actions -> "Build Adreno 730 GPU Driver (ingres)" -> Run workflow.
 #  Run pertama: matikan publish_release untuk uji dulu (zip ada di Artifacts).
@@ -23,12 +25,13 @@ on:
   workflow_dispatch:
     inputs:
       source_mode:
-        description: 'global = blob stock Snapdragon 8 Gen 1 publik (otomatis) | custom = zip sendiri'
+        description: 'latest = versi stock tertinggi yang publik (otomatis) | stock = blob Xiaomi SM8450 | custom = zip sendiri'
         type: choice
         options:
-          - global
+          - latest
+          - stock
           - custom
-        default: global
+        default: latest
       driver_version:
         description: 'Versi WAJIB cocok (mis. 837.0.9). Kosong = pakai versi asli dari source'
         required: false
@@ -271,26 +274,26 @@ jobs:
           # Ambil source driver Adreno ke folder dl/ dan tulis deskripsi sumber ke out/source.txt
           #
           # Urutan:  SRC_PATH (file di repo)  >  SRC_URL  >  mode:
-          #   SRC_MODE=global (default)  blob stock Snapdragon 8 Gen 1 (SM8450) dari repo publik (TheMuppets)
+          #   SRC_MODE=latest (default)  driver stock Adreno 730 versi TERTINGGI dari repo blob publik (find_latest.py)
+          #   SRC_MODE=stock             blob stock Xiaomi SM8450 (sama seperti ROM ingres), versi dipatok
           #   SRC_MODE=custom            zip milikmu di GitHub Release (tag SRC_TAG, default driver-src)
           #
           # Env: SRC_MODE, SRC_URL, SRC_PATH, SRC_SHA256, SRC_TAG, DRIVER_VERSION, GH_TOKEN, GITHUB_REPOSITORY
-          #      GLOBAL_REPO / GLOBAL_BRANCH / GLOBAL_URL (opsional, untuk mengganti sumber global)
+          #      GLOBAL_REPO / GLOBAL_BRANCH / GLOBAL_URL (mode stock), LATEST_CANDIDATES / PREFER_BRANCH (mode latest)
           set -euo pipefail
 
           rm -rf dl && mkdir -p dl out
           : > out/source.txt
           note() { printf '%s\n' "$*" >> out/source.txt; }
 
-          fetch_global() {
-            local repo="${GLOBAL_REPO:-TheMuppets/proprietary_vendor_xiaomi_sm8450-common}"
-            local url="${GLOBAL_URL:-https://github.com/$repo.git}"
-            local want="${GLOBAL_BRANCH:-lineage-23.2}" br tmp sha date
-            echo "Mode global: blob stock Snapdragon 8 Gen 1 dari $repo"
+          # fetch_blobs <repo> <url> <branch> <prefix>  -> dl/vendor/... (branch tidak ada -> lineage-* terbaru)
+          fetch_blobs() {
+            local repo="$1" url="$2" want="$3" P="$4" br tmp
+            echo "Ambil blob GPU dari $repo"
 
             if ! git ls-remote --heads "$url" >/dev/null 2>&1; then
-              echo "::error::Repo sumber global tidak bisa diakses: $url"
-              echo "::error::Pakai source_mode=custom dan zip milikmu (release 'driver-src' / src_url)."
+              echo "::error::Repo sumber publik tidak bisa diakses: $url"
+              echo "::error::Pakai source_mode=custom dan zip milikmu (release 'driver-src' / src_url), atau coba lagi nanti."
               exit 1
             fi
             if git ls-remote --exit-code --heads "$url" "$want" >/dev/null 2>&1; then
@@ -304,32 +307,64 @@ jobs:
             tmp="$(mktemp -d)"
             git clone -q --depth 1 --filter=blob:none --sparse -b "$br" "$url" "$tmp/g"
             git -C "$tmp/g" sparse-checkout set --no-cone \
-              '/proprietary/vendor/lib/egl/' \
-              '/proprietary/vendor/lib64/egl/' \
-              '/proprietary/vendor/lib/hw/vulkan.adreno.so' \
-              '/proprietary/vendor/lib64/hw/vulkan.adreno.so' \
-              '/proprietary/vendor/lib*/libgsl.so' \
-              '/proprietary/vendor/lib*/libadreno_utils.so' \
-              '/proprietary/vendor/lib*/libadreno_app_profiles.so' \
-              '/proprietary/vendor/lib*/libllvm-qgl.so' \
-              '/proprietary/vendor/lib*/libCB.so' \
-              '/proprietary/vendor/gpu/' \
-              '/proprietary/vendor/firmware/a730_sqe.fw' \
-              '/proprietary/vendor/firmware/gmu_gen70000.bin'
+              "/${P}vendor/lib/egl/" \
+              "/${P}vendor/lib64/egl/" \
+              "/${P}vendor/lib/hw/vulkan.adreno.so" \
+              "/${P}vendor/lib64/hw/vulkan.adreno.so" \
+              "/${P}vendor/lib*/libgsl.so" \
+              "/${P}vendor/lib*/libadreno_utils.so" \
+              "/${P}vendor/lib*/libadreno_app_profiles.so" \
+              "/${P}vendor/lib*/libllvm-*.so" \
+              "/${P}vendor/lib*/libCB.so" \
+              "/${P}vendor/gpu/" \
+              "/${P}vendor/firmware/a730_sqe.fw" \
+              "/${P}vendor/firmware/gmu_gen70000.bin"
 
-            if [ ! -f "$tmp/g/proprietary/vendor/lib64/egl/libGLESv2_adreno.so" ]; then
+            if [ ! -f "$tmp/g/${P}vendor/lib64/egl/libGLESv2_adreno.so" ]; then
               echo "::error::libGLESv2_adreno.so tidak ada di $repo@$br (struktur repo berubah?)"
               exit 1
             fi
             mkdir -p dl/vendor
-            cp -a "$tmp/g/proprietary/vendor/." dl/vendor/
-            sha="$(git -C "$tmp/g" rev-parse --short=10 HEAD)"
-            date="$(git -C "$tmp/g" log -1 --format=%cs)"
+            cp -a "$tmp/g/${P}vendor/." dl/vendor/
+            BLOB_BRANCH="$br"
+            BLOB_SHA="$(git -C "$tmp/g" rev-parse --short=10 HEAD)"
+            BLOB_DATE="$(git -C "$tmp/g" log -1 --format=%cs)"
             rm -rf "$tmp"
+            echo "Sumber: $repo@$br ($BLOB_SHA, $BLOB_DATE)"
+          }
 
-            note "Mode global (publik): blob stock Snapdragon 8 Gen 1 (SM8450) dari \`$repo\` branch \`$br\` commit \`$sha\` ($date)."
-            note "Ini driver stock OEM, bukan build komunitas 837.x; kemungkinan sama atau mirip dengan driver yang sudah ada di ROM. Untuk 837.x pakai source_mode=custom dengan zip sendiri."
-            echo "Sumber global: $repo@$br ($sha, $date)"
+          fetch_stock() {
+            local repo="${GLOBAL_REPO:-TheMuppets/proprietary_vendor_xiaomi_sm8450-common}"
+            echo "Mode stock: blob Xiaomi SM8450 (samaan dengan stock ingres)"
+            fetch_blobs "$repo" "${GLOBAL_URL:-https://github.com/$repo.git}" "${GLOBAL_BRANCH:-lineage-23.2}" "proprietary/"
+            note "Mode stock (publik): blob Snapdragon 8 Gen 1 (SM8450) dari \`$repo\` branch \`$BLOB_BRANCH\` commit \`$BLOB_SHA\` ($BLOB_DATE)."
+            note "Ini driver stock Xiaomi, bukan build komunitas 837.x; kemungkinan sama dengan driver yang sudah ada di ROM."
+          }
+
+          fetch_latest() {
+            local line repo branch prefix ver date
+            echo "Mode latest: cari driver Adreno 730 versi tertinggi di repo blob publik"
+            line="$(python3 "$(dirname "$0")/find_latest.py" --out out/latest-scan.json)" || {
+              echo "::error::Pencarian versi terbaru gagal. Coba source_mode=stock, atau custom dengan zip sendiri."
+              exit 1
+            }
+            IFS=$'\t' read -r repo branch prefix ver date <<< "$line"
+            echo "Terpilih: $repo@$branch -> v$ver ($date)"
+            fetch_blobs "$repo" "${GLOBAL_BASE_URL:-https://github.com/}$repo.git" "$branch" "$prefix"
+            note "Mode latest (publik): versi tertinggi dari kandidat yang lengkap = v$ver ($date), diambil dari \`$repo\` branch \`$BLOB_BRANCH\` commit \`$BLOB_SHA\`."
+            note "Ini driver stock Qualcomm dari firmware OEM lain dengan SoC sama (bukan build komunitas 837.x); versi lebih baru dari stock ingres bila ada, bukan jaminan lebih cepat."
+            python3 - <<'PYSCAN' >> out/source.txt
+          import json
+          d = json.load(open("out/latest-scan.json"))
+          seen = {}
+          for r in d["scanned"]:
+              k = r["repo"].split("/")[-1].replace("proprietary_vendor_", "")
+              if r.get("version"):
+                  seen.setdefault(k, set()).add(r["version"] + ("" if r["ok"] else " (tidak lengkap, dilewati)"))
+              else:
+                  seen.setdefault(k, set()).add(r.get("why", "?"))
+          print("Dipindai: " + "; ".join(f"{k}: {', '.join(sorted(v))}" for k, v in seen.items()))
+          PYSCAN
           }
 
           fetch_release() {
@@ -342,7 +377,7 @@ jobs:
             if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
               echo "::error::Release '$TAG' belum ada di $REPO."
               echo "::error::Buat dulu: Releases -> Draft a new release -> tag '$TAG' -> lampirkan zip driver -> Publish."
-              echo "::error::Atau jalankan dengan source_mode=global (otomatis, driver stock Snapdragon 8 Gen 1)."
+              echo "::error::Atau jalankan dengan source_mode=latest (otomatis, driver stock Adreno 730 terbaru yang publik)."
               exit 1
             fi
             names="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -iE '\.(zip|7z|tar\.gz|tgz|tar\.xz)$' || true)"
@@ -403,10 +438,13 @@ jobs:
                 ;;
             esac
             note "Mode custom: diunduh dari \`${SRC_URL%%\?*}\`."
-          elif [ "${SRC_MODE:-global}" = "custom" ]; then
-            fetch_release
           else
-            fetch_global
+            case "${SRC_MODE:-latest}" in
+              custom) fetch_release ;;
+              stock)  fetch_stock ;;
+              latest|global|"") fetch_latest ;;
+              *) echo "::error::source_mode tidak dikenal: ${SRC_MODE}"; exit 1 ;;
+            esac
           fi
 
           # Tolak halaman HTML (login / captcha / link kedaluwarsa)
@@ -437,6 +475,171 @@ jobs:
             fi
           done
           __AX_EOF_FETCH_SOURCE__
+
+          cat > ax/scripts/find_latest.py <<'__AX_EOF_FIND_LATEST__'
+          #!/usr/bin/env python3
+          """Cari driver Adreno 730 (stock OEM) versi tertinggi di repo blob publik.
+
+          Setiap kandidat (repo TheMuppets untuk perangkat Snapdragon 8 / 8+ Gen 1) dipindai pada beberapa
+          branch lineage-* terbaru: versi dibaca dari string 'V@0615.98' di libGLESv2_adreno.so (tanpa
+          mengunduh seluruh repo), lalu dicek kelengkapan file inti. Yang dipilih: versi tertinggi dan lengkap;
+          versi sama -> urutan kandidat lebih awal menang, lalu branch PREFER_BRANCH
+          (default lineage-23.2 = Android 16 QPR2), lalu branch terbaru.
+
+          Pemakaian: find_latest.py --out out/latest-scan.json [--branches 3]
+          Env: PREFER_BRANCH (default lineage-23.2), LATEST_CANDIDATES (satu repo per baris/koma: owner/repo atau URL git penuh),
+               GLOBAL_BASE_URL (default https://github.com/)
+          """
+          import argparse
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+          from concurrent.futures import ThreadPoolExecutor
+          from pathlib import Path
+
+          DEFAULT_CANDIDATES = [
+              "TheMuppets/proprietary_vendor_xiaomi_sm8450-common",   # stock ingres / Xiaomi 12 (SM8450)
+              "TheMuppets/proprietary_vendor_sony_sm8450-common",     # Xperia 1 IV / 5 IV (SM8450)
+              "TheMuppets/proprietary_vendor_nothing_pong",           # Nothing Phone (2) (SM8475)
+              "TheMuppets/proprietary_vendor_motorola_sm8475-common",  # Motorola (SM8475)
+          ]
+
+          # file inti yang harus ada (relatif terhadap <prefix>vendor/) supaya paket tidak setengah-setengah
+          REQUIRED = [
+              "lib64/egl/libGLESv2_adreno.so",
+              "lib64/egl/libEGL_adreno.so",
+              "lib64/hw/vulkan.adreno.so",
+              "lib64/libgsl.so",
+              "lib64/libadreno_utils.so",
+              "lib/egl/libGLESv2_adreno.so",
+              "lib/libgsl.so",
+          ]
+
+          ENV = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+
+
+          def git(*args, cwd=None, timeout=120, text=True):
+              return subprocess.run(["git", *args], cwd=cwd, env=ENV, capture_output=True, text=text, timeout=timeout)
+
+
+          def log(msg):
+              print(msg, file=sys.stderr, flush=True)
+
+
+          def clone_url(cand):
+              if "://" in cand or cand.startswith("/") or cand.startswith("file:"):
+                  return cand
+              base = os.environ.get("GLOBAL_BASE_URL", "https://github.com/")
+              return f"{base.rstrip('/')}/{cand}.git"
+
+
+          def branch_key(b):
+              m = re.fullmatch(r"lineage-(\d+)(?:\.(\d+))?", b)
+              return (int(m.group(1)), int(m.group(2) or 0)) if m else None
+
+
+          def scan_branch(cand, url, branch, tmp):
+              res = {"repo": cand, "branch": branch, "ok": False}
+              d = Path(tmp) / re.sub(r"[^\w.-]", "_", f"{cand}@{branch}")
+              r = git("clone", "-q", "--depth", "1", "--filter=blob:none", "--no-checkout", "-b", branch, url, str(d))
+              if r.returncode != 0:
+                  res["why"] = "clone gagal"
+                  return res
+              ls = git("ls-tree", "-r", "--name-only", "HEAD", cwd=d)
+              paths = set(ls.stdout.split("\n"))
+              prefix = None
+              for p in paths:
+                  m = re.fullmatch(r"(.*)vendor/lib64/egl/libGLESv2_adreno\.so", p)
+                  if m:
+                      prefix = m.group(1)
+                      break
+              if prefix is None:
+                  res["why"] = "tanpa libGLESv2_adreno.so"
+                  return res
+              missing = [f for f in REQUIRED if f"{prefix}vendor/{f}" not in paths]
+              blob = git("show", f"HEAD:{prefix}vendor/lib64/egl/libGLESv2_adreno.so", cwd=d, text=False).stdout
+              vers = {(int(a), int(b)) for a, b in re.findall(rb"V@0*(\d+)\.(\d+) \(GIT@", blob)}
+              if not vers:
+                  res["why"] = "versi tidak terbaca"
+                  return res
+              ver = max(vers)
+              dm = re.search(rb"\(Date:(\d\d/\d\d/\d\d)\)", blob)
+              res.update(
+                  prefix=prefix,
+                  version=f"{ver[0]}.{ver[1]}",
+                  vkey=list(ver),
+                  date=dm.group(1).decode() if dm else "",
+                  commit=git("rev-parse", "--short=10", "HEAD", cwd=d).stdout.strip(),
+              )
+              if missing:
+                  res["why"] = "tidak lengkap: " + ", ".join(missing)
+                  return res
+              res["ok"] = True
+              return res
+
+
+          def scan_candidate(idx, cand, nbranch, tmp):
+              url = clone_url(cand)
+              r = git("ls-remote", "--heads", url)
+              if r.returncode != 0:
+                  return [{"repo": cand, "ok": False, "why": "repo tidak bisa diakses", "idx": idx}]
+              names = [ln.split("refs/heads/", 1)[1] for ln in r.stdout.splitlines() if "refs/heads/" in ln]
+              brs = sorted((b for b in names if branch_key(b)), key=branch_key, reverse=True)[:nbranch]
+              if not brs:
+                  return [{"repo": cand, "ok": False, "why": "tanpa branch lineage-*", "idx": idx}]
+              out = []
+              for b in brs:
+                  try:
+                      res = scan_branch(cand, url, b, tmp)
+                  except subprocess.TimeoutExpired:
+                      res = {"repo": cand, "branch": b, "ok": False, "why": "timeout"}
+                  res["idx"] = idx
+                  out.append(res)
+              return out
+
+
+          def main():
+              ap = argparse.ArgumentParser()
+              ap.add_argument("--out", required=True)
+              ap.add_argument("--branches", type=int, default=3)
+              a = ap.parse_args()
+
+              raw = os.environ.get("LATEST_CANDIDATES", "").strip()
+              cands = [c for c in re.split(r"[\s,]+", raw) if c] or DEFAULT_CANDIDATES
+
+              tmp = tempfile.mkdtemp(prefix="axscan_")
+              try:
+                  with ThreadPoolExecutor(max_workers=4) as ex:
+                      groups = list(ex.map(lambda ic: scan_candidate(ic[0], ic[1], a.branches, tmp), enumerate(cands)))
+              finally:
+                  shutil.rmtree(tmp, ignore_errors=True)
+
+              rows = [r for g in groups for r in g]
+              for r in rows:
+                  tag = "OK   " if r["ok"] else "skip "
+                  ver = r.get("version", "-")
+                  log(f"{tag} {r['repo']}@{r.get('branch', '-')}: v{ver} {r.get('date', '')} {r.get('why', '')}".rstrip())
+
+              ok = [r for r in rows if r["ok"]]
+              if not ok:
+                  log("::error::Tidak ada kandidat publik yang lengkap. Pakai source_mode=stock atau custom.")
+                  Path(a.out).write_text(json.dumps({"best": None, "scanned": rows}, indent=2) + "\n")
+                  sys.exit(1)
+              # versi tertinggi; seri -> idx kandidat lebih kecil, lalu branch lebih baru
+              prefer = os.environ.get("PREFER_BRANCH", "lineage-23.2")
+              best = sorted(ok, key=lambda r: (tuple(-x for x in r["vkey"]), r["idx"], 0 if r["branch"] == prefer else 1,
+                                               tuple(-x for x in branch_key(r["branch"]))))[0]
+              Path(a.out).write_text(json.dumps({"best": best, "scanned": rows}, indent=2) + "\n")
+              print(f"{best['repo']}\t{best['branch']}\t{best['prefix']}\t{best['version']}\t{best['date']}")
+
+
+          if __name__ == "__main__":
+              main()
+          __AX_EOF_FIND_LATEST__
 
           cat > ax/scripts/adreno_pack.py <<'__AX_EOF_ADRENO_PACK__'
           #!/usr/bin/env python3
@@ -1283,6 +1486,10 @@ jobs:
               main()
           __AX_EOF_ADRENO_PACK__
 
+      - name: Tulis template modul
+        run: |
+          set -euo pipefail
+          mkdir -p ax/tpl
           cat > ax/tpl/customize.sh <<'__AX_EOF_TPL_CUSTOMIZE__'
           #!/system/bin/sh
           # Adreno 730 GPU Driver @VERSION@ (ingres) - by kingD2N
